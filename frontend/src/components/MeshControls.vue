@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { useFEAStore } from '../store/fea';
+import { PARAM_KEYS, PARAM_LIMITS } from '../utils/fea-solver';
 
 const store = useFEAStore();
+const paramKeys = PARAM_KEYS;
+const limits = PARAM_LIMITS;
 </script>
 
 <template>
@@ -35,6 +38,53 @@ const store = useFEAStore();
         >
           简单框架
         </button>
+      </div>
+    </div>
+
+    <!-- Model parameters -->
+    <div>
+      <div class="flex items-baseline justify-between mb-1">
+        <div class="text-xs text-slate-400">模型参数</div>
+        <div class="text-[10px] text-slate-500">
+          基线: {{ store.presetLabel }}
+          <span v-if="store.isModified" class="text-amber-400">· 已修改</span>
+          <span v-else>· 默认</span>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div
+          v-for="key in paramKeys"
+          :key="key"
+          :class="{ 'col-span-2': key === 'area' }"
+        >
+          <div class="flex justify-between text-[10px] mb-0.5">
+            <span :class="store.paramErrors[key] ? 'text-red-400' : 'text-slate-400'">
+              {{ limits[key].label }}<span v-if="limits[key].unit" class="text-slate-500"> ({{ limits[key].unit }})</span>
+            </span>
+            <span class="text-slate-600">{{ limits[key].min }} ~ {{ limits[key].max }}</span>
+          </div>
+          <input
+            type="number"
+            v-model="store.paramDraft[key]"
+            @input="store.applyMeshParams()"
+            :min="limits[key].min"
+            :max="limits[key].max"
+            :step="limits[key].step"
+            class="w-full bg-slate-900 border rounded px-2 py-1 text-xs focus:outline-none transition"
+            :class="store.paramErrors[key]
+              ? 'border-red-500 text-red-300 focus:border-red-400'
+              : 'border-slate-600 text-slate-200 focus:border-sky-500'"
+          />
+          <div v-if="store.paramErrors[key]" class="text-[10px] text-red-400 mt-0.5 leading-tight">
+            {{ store.paramErrors[key] }}
+          </div>
+        </div>
+      </div>
+      <div
+        v-if="store.hasParamErrors"
+        class="mt-2 text-[10px] text-red-300 bg-red-950/50 border border-red-900 rounded px-2 py-1"
+      >
+        存在非法参数，未重新划分 —— 已保留上一次可用的模型与结果
       </div>
     </div>
 

@@ -20,6 +20,7 @@ onMounted(() => {
         🔬 有限元应力热力图可视化
       </h1>
       <div class="text-xs text-slate-500">
+        算例: {{ store.presetLabel }} |
         节点: {{ store.model.nodes.length }} |
         单元: {{ store.model.elements.length }}
       </div>

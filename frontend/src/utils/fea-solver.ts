@@ -191,12 +191,57 @@ function gaussianElimination(A: number[][], b: number[]): number[] {
   return x;
 }
 
+// ─── Mesh Parameters ────────────────────────────────────────────────────────
+export interface MeshParams {
+  nDivX: number;        // 跨数
+  nDivY: number;        // 层数
+  spanLength: number;   // 跨长 (m)
+  layerHeight: number;  // 层高 (m)
+  area: number;         // 截面尺寸 (mm²)
+}
+
+export const PARAM_KEYS: (keyof MeshParams)[] = [
+  'nDivX',
+  'nDivY',
+  'spanLength',
+  'layerHeight',
+  'area',
+];
+
+export const PARAM_LIMITS: Record<
+  keyof MeshParams,
+  { min: number; max: number; integer?: boolean; label: string; unit?: string; step: number }
+> = {
+  nDivX: { min: 1, max: 20, integer: true, label: '跨数', step: 1 },
+  nDivY: { min: 1, max: 10, integer: true, label: '层数', step: 1 },
+  spanLength: { min: 0.2, max: 5, label: '跨长', unit: 'm', step: 0.1 },
+  layerHeight: { min: 0.2, max: 5, label: '层高', unit: 'm', step: 0.1 },
+  area: { min: 100, max: 20000, label: '截面尺寸', unit: 'mm²', step: 100 },
+};
+
+export const PRESET_LABELS: Record<string, string> = {
+  cantilever: '悬臂梁',
+  bridge: '桥梁桁架',
+  frame: '简单框架',
+};
+
+const DEFAULT_MESH_PARAMS: Record<string, MeshParams> = {
+  cantilever: { nDivX: 8, nDivY: 2, spanLength: 0.5, layerHeight: 0.5, area: 1000 },
+  bridge: { nDivX: 10, nDivY: 1, spanLength: 1, layerHeight: 2, area: 1000 },
+  frame: { nDivX: 4, nDivY: 4, spanLength: 0.75, layerHeight: 0.75, area: 1000 },
+};
+
+export function defaultMeshParams(preset: string): MeshParams {
+  return { ...(DEFAULT_MESH_PARAMS[preset] ?? DEFAULT_MESH_PARAMS.cantilever) };
+}
+
 // ─── Mesh Generators ────────────────────────────────────────────────────────
 export function buildTrussBeam(
   length: number,
   height: number,
   nDivX: number,
-  nDivY: number
+  nDivY: number,
+  area = 0.001
 ): FEAModel {
   const nodes: Node[] = [];
   const elements: Element[] = [];
@@ -206,7 +251,7 @@ export function buildTrussBeam(
   const dx = length / nDivX;
   const dy = height / nDivY;
   const E = 200e9; // 200 GPa steel
-  const A = 0.001; // 1000 mm²
+  const A = area;
 
   const nodeGrid: number[][] = [];
   for (let iy = 0; iy <= nDivY; iy++) {
@@ -273,20 +318,28 @@ export function buildTrussBeam(
   return { nodes, elements, loads: [] };
 }
 
-export function buildCantileverBeam(
-  length: number,
-  height: number,
-  nElements: number
-): FEAModel {
-  const model = buildTrussBeam(length, height, nElements, 2);
-  const N = model.nodes.length;
+// Find the node closest to (x, y) — robust against floating-point drift
+// when lengths are derived from user-supplied parameters.
+function nearestNode(nodes: Node[], x: number, y: number): Node | null {
+  let best: Node | null = null;
+  let bestDist = Infinity;
+  for (const n of nodes) {
+    const d = (n.x - x) ** 2 + (n.y - y) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = n;
+    }
+  }
+  return best;
+}
+
+export function buildCantileverBeam(p: MeshParams): FEAModel {
+  const length = p.nDivX * p.spanLength;
+  const height = p.nDivY * p.layerHeight;
+  const model = buildTrussBeam(length, height, p.nDivX, p.nDivY, p.area * 1e-6);
   // Apply downward load at right end
-  const rightTopNode = model.nodes.find(
-    (n) => n.x === length && n.y === height
-  );
-  const rightBottomNode = model.nodes.find(
-    (n) => n.x === length && n.y === 0
-  );
+  const rightTopNode = nearestNode(model.nodes, length, height);
+  const rightBottomNode = nearestNode(model.nodes, length, 0);
   if (rightTopNode) {
     model.loads.push({ nodeId: rightTopNode.id, fx: 0, fy: -10000 });
   }
@@ -296,58 +349,63 @@ export function buildCantileverBeam(
   return model;
 }
 
-export function buildBridgeTruss(
-  span: number,
-  height: number,
-  nPanels: number
-): FEAModel {
-  const model = buildTrussBeam(span, height, nPanels, 1);
-  // Simply supported: fix left bottom (pin), right bottom (roller - only y fixed)
+export function buildBridgeTruss(p: MeshParams): FEAModel {
+  const span = p.nDivX * p.spanLength;
+  const height = p.nDivY * p.layerHeight;
+  const model = buildTrussBeam(span, height, p.nDivX, p.nDivY, p.area * 1e-6);
+  // Simply supported: fix left bottom (pin) and right bottom (roller,
+  // approximated by fixing both directions)
   for (const node of model.nodes) {
     node.fixed = false;
   }
-  const leftBottom = model.nodes.find((n) => n.x === 0 && n.y === 0);
-  const rightBottom = model.nodes.find((n) => n.x === span && n.y === 0);
+  const leftBottom = nearestNode(model.nodes, 0, 0);
+  const rightBottom = nearestNode(model.nodes, span, 0);
   if (leftBottom) leftBottom.fixed = true;
-  if (rightBottom) {
-    // Roller: we approximate by fixing y only via very stiff spring in y
-    rightBottom.fixed = true;
-    // We'll handle this by unfixing x in the solve step - for simplicity just fix both
-  }
+  if (rightBottom) rightBottom.fixed = true;
 
   // Load at center bottom
-  const centerX = span / 2;
-  const centerBottom = model.nodes.reduce((best, n) => {
-    if (n.y !== 0) return best;
-    if (!best) return n;
-    return Math.abs(n.x - centerX) < Math.abs(best.x - centerX) ? n : best;
-  }, null as Node | null);
+  const centerBottom = nearestNode(model.nodes, span / 2, 0);
   if (centerBottom) {
     model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -50000 });
   }
   return model;
 }
 
-// ─── Preset Models ──────────────────────────────────────────────────────────
-export const presetCantileverBeam = (): FEAModel => buildCantileverBeam(4, 1, 8);
-export const presetBridgeTruss = (): FEAModel => buildBridgeTruss(10, 2, 10);
-export const presetSimpleFrame = (): FEAModel => {
-  const model = buildTrussBeam(3, 3, 4, 4);
+export function buildSimpleFrame(p: MeshParams): FEAModel {
+  const length = p.nDivX * p.spanLength;
+  const height = p.nDivY * p.layerHeight;
+  const model = buildTrussBeam(length, height, p.nDivX, p.nDivY, p.area * 1e-6);
   // Fix bottom row
   for (const node of model.nodes) {
     if (node.y === 0) node.fixed = true;
   }
   // Apply load at top center
-  const topCenter = model.nodes.reduce((best, n) => {
-    if (n.y !== 3) return best;
-    if (!best) return n;
-    return Math.abs(n.x - 1.5) < Math.abs(best.x - 1.5) ? n : best;
-  }, null as Node | null);
+  const topCenter = nearestNode(model.nodes, length / 2, height);
   if (topCenter) {
     model.loads.push({ nodeId: topCenter.id, fx: 5000, fy: -20000 });
   }
   return model;
-};
+}
+
+export function buildModel(preset: string, params: MeshParams): FEAModel {
+  switch (preset) {
+    case 'bridge':
+      return buildBridgeTruss(params);
+    case 'frame':
+      return buildSimpleFrame(params);
+    case 'cantilever':
+    default:
+      return buildCantileverBeam(params);
+  }
+}
+
+// ─── Preset Models ──────────────────────────────────────────────────────────
+export const presetCantileverBeam = (): FEAModel =>
+  buildCantileverBeam(defaultMeshParams('cantilever'));
+export const presetBridgeTruss = (): FEAModel =>
+  buildBridgeTruss(defaultMeshParams('bridge'));
+export const presetSimpleFrame = (): FEAModel =>
+  buildSimpleFrame(defaultMeshParams('frame'));
 
 // ─── Jet Colormap ───────────────────────────────────────────────────────────
 export function jetColormap(value: number, min: number, max: number): string {

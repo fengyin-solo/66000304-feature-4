@@ -1,13 +1,16 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, reactive, computed } from 'vue';
 import type { FEAModel, FEAResult } from '../types';
 import {
   solve as feaSolve,
-  presetCantileverBeam,
-  presetBridgeTruss,
-  presetSimpleFrame,
+  buildModel,
+  defaultMeshParams,
   jetColormap,
+  PARAM_KEYS,
+  PARAM_LIMITS,
+  PRESET_LABELS,
 } from '../utils/fea-solver';
+import type { MeshParams } from '../utils/fea-solver';
 
 export const useFEAStore = defineStore('fea', () => {
   const model = ref<FEAModel>({ nodes: [], elements: [], loads: [] });
@@ -18,24 +21,77 @@ export const useFEAStore = defineStore('fea', () => {
   const selectedElement = ref<number | null>(null);
   const heatmapMode = ref<'stress' | 'strain' | 'force'>('stress');
 
+  // ─── Mesh parameters ──────────────────────────────────────────────────────
+  // Last valid params per preset — switching presets restores these.
+  const savedParams = reactive<Record<string, MeshParams>>({
+    cantilever: defaultMeshParams('cantilever'),
+    bridge: defaultMeshParams('bridge'),
+    frame: defaultMeshParams('frame'),
+  });
+  // Raw text shown in the parameter inputs (kept as text so out-of-range
+  // typing doesn't destroy the last valid model).
+  const paramDraft = ref<Record<keyof MeshParams, string>>(toDraft(savedParams.cantilever));
+  const paramErrors = ref<Partial<Record<keyof MeshParams, string>>>({});
+
+  function toDraft(p: MeshParams): Record<keyof MeshParams, string> {
+    return {
+      nDivX: String(p.nDivX),
+      nDivY: String(p.nDivY),
+      spanLength: String(p.spanLength),
+      layerHeight: String(p.layerHeight),
+      area: String(p.area),
+    };
+  }
+
+  function validateDraft(): {
+    params: MeshParams;
+    errors: Partial<Record<keyof MeshParams, string>>;
+  } {
+    const errors: Partial<Record<keyof MeshParams, string>> = {};
+    const params = {} as MeshParams;
+    for (const key of PARAM_KEYS) {
+      const lim = PARAM_LIMITS[key];
+      const raw = paramDraft.value[key].trim();
+      const v = raw === '' ? NaN : Number(raw);
+      if (!Number.isFinite(v)) {
+        errors[key] = `${lim.label}必须是有效数字`;
+        continue;
+      }
+      if (lim.integer && !Number.isInteger(v)) {
+        errors[key] = `${lim.label}必须是整数`;
+        continue;
+      }
+      if (v < lim.min || v > lim.max) {
+        errors[key] = `${lim.label}需在 ${lim.min} ~ ${lim.max} 之间`;
+        continue;
+      }
+      params[key] = v;
+    }
+    return { params, errors };
+  }
+
   // ─── Actions ──────────────────────────────────────────────────────────────
   function loadPreset(name: string) {
-    selectedPreset.value = name;
+    const key = name in savedParams ? name : 'cantilever';
+    selectedPreset.value = key;
     result.value = null;
     selectedElement.value = null;
-    switch (name) {
-      case 'cantilever':
-        model.value = presetCantileverBeam();
-        break;
-      case 'bridge':
-        model.value = presetBridgeTruss();
-        break;
-      case 'frame':
-        model.value = presetSimpleFrame();
-        break;
-      default:
-        model.value = presetCantileverBeam();
-    }
+    paramErrors.value = {};
+    // Restore this preset's params as they were when left
+    paramDraft.value = toDraft(savedParams[key]);
+    model.value = buildModel(key, savedParams[key]);
+  }
+
+  // Rebuild the mesh from the current draft. Invalid input keeps the last
+  // usable model/result and reports which fields are out of range.
+  function applyMeshParams() {
+    const { params, errors } = validateDraft();
+    paramErrors.value = errors;
+    if (Object.keys(errors).length > 0) return;
+    savedParams[selectedPreset.value] = params;
+    model.value = buildModel(selectedPreset.value, params);
+    result.value = null;
+    selectedElement.value = null;
   }
 
   function solve() {
@@ -64,6 +120,22 @@ export const useFEAStore = defineStore('fea', () => {
   }
 
   // ─── Computed ─────────────────────────────────────────────────────────────
+  const presetLabel = computed(
+    () => PRESET_LABELS[selectedPreset.value] ?? selectedPreset.value
+  );
+
+  const hasParamErrors = computed(
+    () => Object.keys(paramErrors.value).length > 0
+  );
+
+  // Whether the current preset's params deviate from its defaults
+  const isModified = computed(() => {
+    const def = defaultMeshParams(selectedPreset.value);
+    const cur = savedParams[selectedPreset.value];
+    if (!cur) return false;
+    return PARAM_KEYS.some((k) => cur[k] !== def[k]);
+  });
+
   const maxStress = computed(() => {
     if (!result.value) return 0;
     return result.value.maxStress;
@@ -118,10 +190,16 @@ export const useFEAStore = defineStore('fea', () => {
     deformationScale,
     selectedElement,
     heatmapMode,
+    paramDraft,
+    paramErrors,
+    presetLabel,
+    hasParamErrors,
+    isModified,
     maxStress,
     maxDisplacement,
     elementColors,
     loadPreset,
+    applyMeshParams,
     solve,
     toggleDeformed,
     selectElement,
