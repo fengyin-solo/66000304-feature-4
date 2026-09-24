@@ -37,3 +37,17 @@ export interface FEAResult {
   maxStress: number;
   reactionForces: { nodeId: number; fx: number; fy: number }[];
 }
+
+// ─── Editable mesh parameters ───────────────────────────────────────────────
+export type PresetName = 'cantilever' | 'bridge' | 'frame';
+
+/** Keys the user can edit in the mesh control panel. */
+export type MeshParamKey = 'spans' | 'layers' | 'spanLength' | 'storyHeight' | 'area';
+
+export interface MeshParams {
+  spans: number;        // number of bays/panels along X
+  layers: number;       // number of cell layers along Y
+  spanLength: number;   // length of one bay (m)
+  storyHeight: number;  // height of one layer (m)
+  area: number;         // cross-section area of chords/columns (mm²)
+}

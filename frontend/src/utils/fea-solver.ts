@@ -1,4 +1,4 @@
-import type { FEAModel, FEAResult, Node, Element, Load } from '../types';
+import type { FEAModel, FEAResult, Node, Element, MeshParams, MeshParamKey, PresetName } from '../types';
 
 // ─── FEA Solver ─────────────────────────────────────────────────────────────
 export function solve(model: FEAModel): FEAResult {
@@ -196,7 +196,8 @@ export function buildTrussBeam(
   length: number,
   height: number,
   nDivX: number,
-  nDivY: number
+  nDivY: number,
+  area = 0.001 // cross-section area in m² (default 1000 mm²)
 ): FEAModel {
   const nodes: Node[] = [];
   const elements: Element[] = [];
@@ -206,7 +207,6 @@ export function buildTrussBeam(
   const dx = length / nDivX;
   const dy = height / nDivY;
   const E = 200e9; // 200 GPa steel
-  const A = 0.001; // 1000 mm²
 
   const nodeGrid: number[][] = [];
   for (let iy = 0; iy <= nDivY; iy++) {
@@ -232,7 +232,7 @@ export function buildTrussBeam(
         elements.push({
           id: elId++,
           nodeIds: [nodeGrid[iy][ix], nodeGrid[iy][ix + 1]],
-          area: A,
+          area,
           youngsModulus: E,
           stress: 0, strain: 0, force: 0,
         });
@@ -242,7 +242,7 @@ export function buildTrussBeam(
         elements.push({
           id: elId++,
           nodeIds: [nodeGrid[iy][ix], nodeGrid[iy + 1][ix]],
-          area: A,
+          area,
           youngsModulus: E,
           stress: 0, strain: 0, force: 0,
         });
@@ -253,7 +253,7 @@ export function buildTrussBeam(
           elements.push({
             id: elId++,
             nodeIds: [nodeGrid[iy][ix], nodeGrid[iy + 1][ix + 1]],
-            area: A * 0.7,
+            area: area * 0.7,
             youngsModulus: E,
             stress: 0, strain: 0, force: 0,
           });
@@ -261,7 +261,7 @@ export function buildTrussBeam(
           elements.push({
             id: elId++,
             nodeIds: [nodeGrid[iy][ix + 1], nodeGrid[iy + 1][ix]],
-            area: A * 0.7,
+            area: area * 0.7,
             youngsModulus: E,
             stress: 0, strain: 0, force: 0,
           });
@@ -273,81 +273,131 @@ export function buildTrussBeam(
   return { nodes, elements, loads: [] };
 }
 
-export function buildCantileverBeam(
-  length: number,
-  height: number,
-  nElements: number
-): FEAModel {
-  const model = buildTrussBeam(length, height, nElements, 2);
-  const N = model.nodes.length;
-  // Apply downward load at right end
-  const rightTopNode = model.nodes.find(
-    (n) => n.x === length && n.y === height
-  );
-  const rightBottomNode = model.nodes.find(
-    (n) => n.x === length && n.y === 0
-  );
-  if (rightTopNode) {
-    model.loads.push({ nodeId: rightTopNode.id, fx: 0, fy: -10000 });
-  }
-  if (rightBottomNode) {
-    model.loads.push({ nodeId: rightBottomNode.id, fx: 0, fy: -10000 });
-  }
-  return model;
+// ─── Parameter ranges & validation ──────────────────────────────────────────
+export interface ParamLimit {
+  min: number;
+  max: number;
+  integer?: boolean;
+  step: number;
 }
 
-export function buildBridgeTruss(
-  span: number,
-  height: number,
-  nPanels: number
-): FEAModel {
-  const model = buildTrussBeam(span, height, nPanels, 1);
-  // Simply supported: fix left bottom (pin), right bottom (roller - only y fixed)
-  for (const node of model.nodes) {
-    node.fixed = false;
-  }
-  const leftBottom = model.nodes.find((n) => n.x === 0 && n.y === 0);
-  const rightBottom = model.nodes.find((n) => n.x === span && n.y === 0);
-  if (leftBottom) leftBottom.fixed = true;
-  if (rightBottom) {
-    // Roller: we approximate by fixing y only via very stiff spring in y
-    rightBottom.fixed = true;
-    // We'll handle this by unfixing x in the solve step - for simplicity just fix both
-  }
-
-  // Load at center bottom
-  const centerX = span / 2;
-  const centerBottom = model.nodes.reduce((best, n) => {
-    if (n.y !== 0) return best;
-    if (!best) return n;
-    return Math.abs(n.x - centerX) < Math.abs(best.x - centerX) ? n : best;
-  }, null as Node | null);
-  if (centerBottom) {
-    model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -50000 });
-  }
-  return model;
-}
-
-// ─── Preset Models ──────────────────────────────────────────────────────────
-export const presetCantileverBeam = (): FEAModel => buildCantileverBeam(4, 1, 8);
-export const presetBridgeTruss = (): FEAModel => buildBridgeTruss(10, 2, 10);
-export const presetSimpleFrame = (): FEAModel => {
-  const model = buildTrussBeam(3, 3, 4, 4);
-  // Fix bottom row
-  for (const node of model.nodes) {
-    if (node.y === 0) node.fixed = true;
-  }
-  // Apply load at top center
-  const topCenter = model.nodes.reduce((best, n) => {
-    if (n.y !== 3) return best;
-    if (!best) return n;
-    return Math.abs(n.x - 1.5) < Math.abs(best.x - 1.5) ? n : best;
-  }, null as Node | null);
-  if (topCenter) {
-    model.loads.push({ nodeId: topCenter.id, fx: 5000, fy: -20000 });
-  }
-  return model;
+export const MESH_PARAM_LIMITS: Record<MeshParamKey, ParamLimit> = {
+  spans: { min: 1, max: 20, integer: true, step: 1 },
+  layers: { min: 1, max: 10, integer: true, step: 1 },
+  spanLength: { min: 0.1, max: 20, step: 0.1 },
+  storyHeight: { min: 0.1, max: 10, step: 0.1 },
+  area: { min: 10, max: 100000, step: 10 }, // 截面尺寸 (mm²)
 };
+
+export const MESH_PARAM_LABELS: Record<MeshParamKey, string> = {
+  spans: '跨数',
+  layers: '层数',
+  spanLength: '跨长',
+  storyHeight: '层高',
+  area: '截面尺寸',
+};
+
+export const MESH_PARAM_UNITS: Record<MeshParamKey, string> = {
+  spans: '跨',
+  layers: '层',
+  spanLength: 'm',
+  storyHeight: 'm',
+  area: 'mm²',
+};
+
+/** Baseline parameter sets for the three named cases. */
+export const DEFAULT_MESH_PARAMS: Record<PresetName, MeshParams> = {
+  cantilever: { spans: 8, layers: 2, spanLength: 0.5, storyHeight: 0.5, area: 1000 },
+  bridge: { spans: 10, layers: 1, spanLength: 1, storyHeight: 2, area: 1000 },
+  frame: { spans: 4, layers: 4, spanLength: 0.75, storyHeight: 0.75, area: 1000 },
+};
+
+/** Validate one field; returns null when legal, otherwise a human-readable reason. */
+export function validateMeshParam(key: MeshParamKey, value: number): string | null {
+  const limit = MESH_PARAM_LIMITS[key];
+  const label = MESH_PARAM_LABELS[key];
+  if (!Number.isFinite(value)) return `${label}必须是数字`;
+  if (limit.integer && !Number.isInteger(value)) {
+    return `${label}必须为整数`;
+  }
+  if (value < limit.min || value > limit.max) {
+    return `${label}超出可用范围（${limit.min} ~ ${limit.max} ${MESH_PARAM_UNITS[key]}）`;
+  }
+  return null;
+}
+
+/** Validate a full parameter set; returns the key + reason of the first illegal field. */
+export function validateMeshParams(
+  params: MeshParams
+): { key: MeshParamKey; message: string } | null {
+  for (const key of ['spans', 'layers', 'spanLength', 'storyHeight', 'area'] as MeshParamKey[]) {
+    const message = validateMeshParam(key, params[key]);
+    if (message) return { key, message };
+  }
+  return null;
+}
+
+// ─── Parameterized Model Builder ────────────────────────────────────────────
+export function buildModel(preset: PresetName, params: MeshParams): FEAModel {
+  const length = params.spans * params.spanLength;
+  const height = params.layers * params.storyHeight;
+  const areaM2 = params.area / 1e6; // mm² -> m²
+  const model = buildTrussBeam(length, height, params.spans, params.layers, areaM2);
+
+  const near = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+  const nodeAt = (ix: number, iy: number) =>
+    model.nodes.find(
+      (n) => near(n.x, ix * params.spanLength) && near(n.y, iy * params.storyHeight)
+    );
+
+  if (preset === 'cantilever') {
+    // Left edge (ix === 0) is already clamped by buildTrussBeam.
+    // Downward loads at both right-end nodes.
+    const rightTop = nodeAt(params.spans, params.layers);
+    const rightBottom = nodeAt(params.spans, 0);
+    if (rightTop) model.loads.push({ nodeId: rightTop.id, fx: 0, fy: -10000 });
+    if (rightBottom) model.loads.push({ nodeId: rightBottom.id, fx: 0, fy: -10000 });
+  } else if (preset === 'bridge') {
+    // Simply supported: pin at the left-bottom node; the right-bottom node is
+    // fixed in both DOFs as an approximation of a roller support.
+    for (const node of model.nodes) node.fixed = false;
+    const leftBottom = nodeAt(0, 0);
+    const rightBottom = nodeAt(params.spans, 0);
+    if (leftBottom) leftBottom.fixed = true;
+    if (rightBottom) rightBottom.fixed = true;
+
+    // Downward load at the center-bottom node
+    const centerBottom = model.nodes.reduce((best, n) => {
+      if (!near(n.y, 0)) return best;
+      if (!best) return n;
+      return Math.abs(n.x - length / 2) < Math.abs(best.x - length / 2) ? n : best;
+    }, null as Node | null);
+    if (centerBottom) model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -50000 });
+  } else {
+    // frame: buildTrussBeam already clamps the left edge (ix === 0);
+    // additionally clamp the whole bottom row, matching the baseline case.
+    for (const node of model.nodes) {
+      if (near(node.y, 0)) node.fixed = true;
+    }
+    // Load at the top-center node
+    const topCenter = model.nodes.reduce((best, n) => {
+      if (!near(n.y, height)) return best;
+      if (!best) return n;
+      return Math.abs(n.x - length / 2) < Math.abs(best.x - length / 2) ? n : best;
+    }, null as Node | null);
+    if (topCenter) model.loads.push({ nodeId: topCenter.id, fx: 5000, fy: -20000 });
+  }
+
+  return model;
+}
+
+// ─── Preset Models (baseline cases) ─────────────────────────────────────────
+export const presetCantileverBeam = (): FEAModel =>
+  buildModel('cantilever', DEFAULT_MESH_PARAMS.cantilever);
+export const presetBridgeTruss = (): FEAModel =>
+  buildModel('bridge', DEFAULT_MESH_PARAMS.bridge);
+export const presetSimpleFrame = (): FEAModel =>
+  buildModel('frame', DEFAULT_MESH_PARAMS.frame);
 
 // ─── Jet Colormap ───────────────────────────────────────────────────────────
 export function jetColormap(value: number, min: number, max: number): string {

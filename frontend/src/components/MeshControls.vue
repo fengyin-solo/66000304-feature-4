@@ -1,7 +1,54 @@
 <script setup lang="ts">
+import { reactive, watch } from 'vue';
 import { useFEAStore } from '../store/fea';
+import {
+  MESH_PARAM_LIMITS,
+  MESH_PARAM_LABELS,
+  MESH_PARAM_UNITS,
+} from '../utils/fea-solver';
+import type { MeshParamKey, PresetName } from '../types';
 
 const store = useFEAStore();
+
+const presetLabels: Record<PresetName, string> = {
+  cantilever: '悬臂梁',
+  bridge: '桥梁桁架',
+  frame: '简单框架',
+};
+
+// Text drafts so the user can clear a field while typing without being
+// forced back to a number mid-edit.
+const draft = reactive<Record<MeshParamKey, string>>({
+  spans: String(store.meshParams.spans),
+  layers: String(store.meshParams.layers),
+  spanLength: String(store.meshParams.spanLength),
+  storyHeight: String(store.meshParams.storyHeight),
+  area: String(store.meshParams.area),
+});
+
+const fields: MeshParamKey[] = ['spans', 'layers', 'spanLength', 'storyHeight', 'area'];
+
+// Switching cases restores that case's parameters; sync the inputs.
+watch(
+  () => store.meshParams,
+  (params) => {
+    for (const key of fields) draft[key] = String(params[key]);
+  },
+  { deep: true }
+);
+
+function regenerate() {
+  const candidate = {
+    spans: Number(draft.spans),
+    layers: Number(draft.layers),
+    spanLength: Number(draft.spanLength),
+    storyHeight: Number(draft.storyHeight),
+    area: Number(draft.area),
+  };
+  store.applyMeshParams(candidate);
+  // On success the watcher above rewrites the drafts; on failure the drafts
+  // stay so the user can see and fix the illegal value.
+}
 </script>
 
 <template>
@@ -35,6 +82,66 @@ const store = useFEAStore();
         >
           简单框架
         </button>
+      </div>
+      <!-- Current case kept as the comparison baseline -->
+      <div class="mt-1.5 text-[10px] text-slate-500 flex items-center justify-between">
+        <span>
+          比较基线：<span class="text-slate-300">{{ presetLabels[store.selectedPreset] }}</span>
+          <span v-if="store.isCustomized" class="text-amber-400">（已自定义）</span>
+        </span>
+        <button
+          v-if="store.isCustomized"
+          @click="store.resetMeshParams()"
+          class="text-sky-400 hover:text-sky-300 underline underline-offset-2"
+        >
+          恢复基线
+        </button>
+      </div>
+    </div>
+
+    <!-- Editable mesh parameters -->
+    <div class="space-y-2 border-t border-slate-700 pt-3">
+      <div class="text-xs text-slate-400">模型参数</div>
+      <div class="grid grid-cols-2 gap-2">
+        <div v-for="key in fields" :key="key">
+          <label class="flex justify-between text-[10px] text-slate-400 mb-0.5">
+            <span>{{ MESH_PARAM_LABELS[key] }}</span>
+            <span class="text-slate-600">
+              {{ MESH_PARAM_LIMITS[key].min }}~{{ MESH_PARAM_LIMITS[key].max }}{{ MESH_PARAM_UNITS[key] }}
+            </span>
+          </label>
+          <div class="relative">
+            <input
+              v-model="draft[key]"
+              type="number"
+              inputmode="decimal"
+              :min="MESH_PARAM_LIMITS[key].min"
+              :max="MESH_PARAM_LIMITS[key].max"
+              :step="MESH_PARAM_LIMITS[key].step"
+              @change="regenerate"
+              @keyup.enter="regenerate"
+              :class="store.paramError?.key === key
+                ? 'border-red-500 focus:ring-red-500'
+                : 'border-slate-600 focus:ring-sky-500'"
+              class="w-full bg-slate-900 border rounded px-2 py-1 pr-9 text-xs text-slate-200 font-mono focus:outline-none focus:ring-1"
+            />
+            <span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-slate-500 pointer-events-none">
+              {{ MESH_PARAM_UNITS[key] }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <button
+        @click="regenerate"
+        class="w-full py-1.5 rounded text-xs font-bold bg-sky-700 text-white hover:bg-sky-600 transition"
+      >
+        🔄 重新生成网格
+      </button>
+
+      <!-- Illegal parameter feedback: names the offending field -->
+      <div v-if="store.paramError" class="text-[11px] text-red-400 bg-red-950/50 border border-red-900 rounded px-2 py-1.5">
+        ⚠ {{ store.paramError.message }}，已保留上一次可用结果
       </div>
     </div>
 

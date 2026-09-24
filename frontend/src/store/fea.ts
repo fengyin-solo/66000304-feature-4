@@ -1,41 +1,77 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
-import type { FEAModel, FEAResult } from '../types';
+import { ref, computed, reactive } from 'vue';
+import type { FEAModel, FEAResult, MeshParams, PresetName, MeshParamKey } from '../types';
 import {
   solve as feaSolve,
-  presetCantileverBeam,
-  presetBridgeTruss,
-  presetSimpleFrame,
+  buildModel,
+  DEFAULT_MESH_PARAMS,
+  validateMeshParams,
   jetColormap,
 } from '../utils/fea-solver';
 
 export const useFEAStore = defineStore('fea', () => {
   const model = ref<FEAModel>({ nodes: [], elements: [], loads: [] });
   const result = ref<FEAResult | null>(null);
-  const selectedPreset = ref<string>('cantilever');
+  const selectedPreset = ref<PresetName>('cantilever');
   const showDeformed = ref(false);
   const deformationScale = ref(10);
   const selectedElement = ref<number | null>(null);
   const heatmapMode = ref<'stress' | 'strain' | 'force'>('stress');
 
+  // Parameters of the currently generated model (the last *valid* state).
+  const meshParams = ref<MeshParams>({ ...DEFAULT_MESH_PARAMS.cantilever });
+
+  // Each named case keeps its own parameter set, so switching away and back
+  // restores the values the user left them at.
+  const paramSets = reactive<Record<PresetName, MeshParams>>({
+    cantilever: { ...DEFAULT_MESH_PARAMS.cantilever },
+    bridge: { ...DEFAULT_MESH_PARAMS.bridge },
+    frame: { ...DEFAULT_MESH_PARAMS.frame },
+  });
+
+  // Validation feedback for the most recent regeneration attempt.
+  const paramError = ref<{ key: MeshParamKey; message: string } | null>(null);
+
   // ─── Actions ──────────────────────────────────────────────────────────────
-  function loadPreset(name: string) {
-    selectedPreset.value = name;
+  function rebuild() {
+    model.value = buildModel(selectedPreset.value, meshParams.value);
     result.value = null;
     selectedElement.value = null;
-    switch (name) {
-      case 'cantilever':
-        model.value = presetCantileverBeam();
-        break;
-      case 'bridge':
-        model.value = presetBridgeTruss();
-        break;
-      case 'frame':
-        model.value = presetSimpleFrame();
-        break;
-      default:
-        model.value = presetCantileverBeam();
+  }
+
+  function loadPreset(name: string) {
+    selectedPreset.value = name as PresetName;
+    // Restore the parameter set stored for this case.
+    meshParams.value = { ...paramSets[selectedPreset.value] };
+    paramError.value = null;
+    rebuild();
+  }
+
+  /**
+   * Regenerate the mesh from the given parameters.
+   * Returns true on success; on failure reports which field is illegal and
+   * keeps the previously generated (last valid) model and its result intact.
+   */
+  function applyMeshParams(params: MeshParams): boolean {
+    const invalid = validateMeshParams(params);
+    if (invalid) {
+      paramError.value = invalid;
+      return false;
     }
+    paramError.value = null;
+    meshParams.value = { ...params };
+    paramSets[selectedPreset.value] = { ...params };
+    rebuild();
+    return true;
+  }
+
+  /** Restore the current case to its built-in baseline parameters. */
+  function resetMeshParams() {
+    const baseline = { ...DEFAULT_MESH_PARAMS[selectedPreset.value] };
+    paramError.value = null;
+    meshParams.value = baseline;
+    paramSets[selectedPreset.value] = { ...baseline };
+    rebuild();
   }
 
   function solve() {
@@ -64,6 +100,12 @@ export const useFEAStore = defineStore('fea', () => {
   }
 
   // ─── Computed ─────────────────────────────────────────────────────────────
+  const isCustomized = computed(
+    () =>
+      JSON.stringify(meshParams.value) !==
+      JSON.stringify(DEFAULT_MESH_PARAMS[selectedPreset.value])
+  );
+
   const maxStress = computed(() => {
     if (!result.value) return 0;
     return result.value.maxStress;
@@ -118,10 +160,15 @@ export const useFEAStore = defineStore('fea', () => {
     deformationScale,
     selectedElement,
     heatmapMode,
+    meshParams,
+    paramError,
+    isCustomized,
     maxStress,
     maxDisplacement,
     elementColors,
     loadPreset,
+    applyMeshParams,
+    resetMeshParams,
     solve,
     toggleDeformed,
     selectElement,
